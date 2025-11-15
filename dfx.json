@@ -1,0 +1,16 @@
+{
+  "canisters": {
+    "eshop_blockchain_backend": {
+      "main": "src/eshop_blockchain_backend/main.mo",
+      "type": "motoko"
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": ""
+    }
+  },
+  "output_env_file": ".env",
+  "version": 1
+}
