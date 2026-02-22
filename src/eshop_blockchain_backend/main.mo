@@ -5,6 +5,7 @@ import Nat "mo:base/Nat";
 import Nat32 "mo:base/Nat32";      // added
 import Nat64 "mo:base/Nat64";
 import Principal "mo:base/Principal";
+import Text "mo:base/Text";
 import Time "mo:base/Time";
 
 persistent actor {
@@ -17,6 +18,15 @@ persistent actor {
   };
 
   public type Status = { #Pending; #Paid; #Shipped; #Delivered; #Cancelled };
+
+  public type Model = { #Order; #Payment };
+
+  public type EntityLink = {
+    model: Model;
+    entityId: Text;
+    txId: Nat;
+    createdAt: Nat64;
+  };
 
   public type Transaction = {
     id: Nat;
@@ -35,9 +45,11 @@ persistent actor {
   // Persistent state
   var nextId: Nat = 0;
   var stableTxs: [Transaction] = [];
+  var stableLinks: [EntityLink] = [];
 
   // Transient state
   transient var txs = Buffer.Buffer<Transaction>(0);
+  transient var links = Buffer.Buffer<EntityLink>(0);
 
   // Bespoke Nat hasher -> Hash.Hash (Nat32)
   func natHash(n: Nat): Hash.Hash {
@@ -52,11 +64,14 @@ persistent actor {
   // Upgrade hooks
   system func preupgrade() {
     stableTxs := Buffer.toArray(txs);
+    stableLinks := Buffer.toArray(links);
   };
 
   system func postupgrade() {
     txs := Buffer.fromArray(stableTxs);
     stableTxs := [];
+    links := Buffer.fromArray(stableLinks);
+    stableLinks := [];
     byId := HashMap.HashMap<Nat, Nat>(txs.size() * 2 + 1, Nat.equal, natHash);
     var i: Nat = 0;
     while (i < txs.size()) {
@@ -85,8 +100,84 @@ persistent actor {
 
   func min(a: Nat, b: Nat): Nat = if (a <= b) a else b;
 
-  // API
-  public shared ({ caller }) func recordTransaction(items: [Item], currency: Text, note: ?Text): async Result<Transaction, Text> {
+  func modelEq(a: Model, b: Model): Bool {
+    switch (a, b) {
+      case (#Order, #Order) { true };
+      case (#Payment, #Payment) { true };
+      case _ { false };
+    }
+  };
+
+  func addEntityLink(model: Model, entityId: Text, txId: Nat) {
+    if (Text.size(Text.trim(entityId, #text " \t\r\n")) == 0) return;
+    links.add({
+      model;
+      entityId;
+      txId;
+      createdAt = now();
+    });
+  };
+
+  func latestTxIdByEntity(model: Model, entityId: Text): ?Nat {
+    var i: Nat = links.size();
+    while (i > 0) {
+      i -= 1;
+      let link = links.get(i);
+      if (modelEq(link.model, model) and link.entityId == entityId) {
+        return ?link.txId;
+      };
+    };
+    null
+  };
+
+  func listByEntity(model: Model, entityId: Text, offset: Nat, limit: Nat): [Transaction] {
+    if (limit == 0) { return [] };
+    let ids = Buffer.Buffer<Nat>(0);
+
+    var i: Nat = 0;
+    while (i < links.size()) {
+      let link = links.get(i);
+      if (modelEq(link.model, model) and link.entityId == entityId) {
+        ids.add(link.txId);
+      };
+      i += 1;
+    };
+
+    let total = ids.size();
+    if (offset >= total) { return [] };
+
+    let end = min(total, offset + limit);
+    let out = Buffer.Buffer<Transaction>(0);
+    var j = offset;
+    while (j < end) {
+      let txId = ids.get(j);
+      switch (byId.get(txId)) {
+        case (?idx) { out.add(txs.get(idx)) };
+        case null {};
+      };
+      j += 1;
+    };
+
+    Buffer.toArray(out)
+  };
+
+  func listAllByModel(model: Model): [Transaction] {
+    let out = Buffer.Buffer<Transaction>(0);
+    var i: Nat = 0;
+    while (i < links.size()) {
+      let link = links.get(i);
+      if (modelEq(link.model, model)) {
+        switch (byId.get(link.txId)) {
+          case (?idx) { out.add(txs.get(idx)) };
+          case null {};
+        }
+      };
+      i += 1;
+    };
+    Buffer.toArray(out)
+  };
+
+  func recordTransactionInternal(caller: Principal, items: [Item], currency: Text, note: ?Text, status: Status): Result<Transaction, Text> {
     switch (validateItems(items)) {
       case (?msg) { #err msg };
       case null {
@@ -100,7 +191,7 @@ persistent actor {
           items;
           total;
           currency;
-          status = #Pending;
+          status;
           createdAt = now();
           updatedAt = now();
           note;
@@ -114,14 +205,77 @@ persistent actor {
     }
   };
 
-  public query func getTransaction(id: Nat): async ?Transaction {
-    switch (byId.get(id)) {
-      case (?i) { ?txs.get(i) };
-      case null { null };
+  // API
+
+  public shared ({ caller }) func recordOrderTransaction(orderId: Text, items: [Item], currency: Text, note: ?Text): async Result<Transaction, Text> {
+    if (Text.size(Text.trim(orderId, #text " \t\r\n")) == 0) {
+      return #err "orderId is required";
+    };
+    let result = recordTransactionInternal(caller, items, currency, note, #Pending);
+    switch (result) {
+      case (#ok tx) {
+        addEntityLink(#Order, orderId, tx.id);
+        #ok tx
+      };
+      case (#err msg) { #err msg };
+    }
+  };
+
+  public shared ({ caller }) func recordPaymentTransaction(paymentId: Text, items: [Item], currency: Text, status: Status, note: ?Text): async Result<Transaction, Text> {
+    if (Text.size(Text.trim(paymentId, #text " \t\r\n")) == 0) {
+      return #err "paymentId is required";
+    };
+    let result = recordTransactionInternal(caller, items, currency, note, status);
+    switch (result) {
+      case (#ok tx) {
+        addEntityLink(#Payment, paymentId, tx.id);
+        #ok tx
+      };
+      case (#err msg) { #err msg };
     }
   };
 
   public query func count(): async Nat { txs.size() };
+
+  public query func getOrderTransaction(orderId: Text): async ?Transaction {
+    switch (latestTxIdByEntity(#Order, orderId)) {
+      case (?txId) {
+        switch (byId.get(txId)) {
+          case (?i) { ?txs.get(i) };
+          case null { null };
+        }
+      };
+      case null { null };
+    }
+  };
+
+  public query func getPaymentTransaction(paymentId: Text): async ?Transaction {
+    switch (latestTxIdByEntity(#Payment, paymentId)) {
+      case (?txId) {
+        switch (byId.get(txId)) {
+          case (?i) { ?txs.get(i) };
+          case null { null };
+        }
+      };
+      case null { null };
+    }
+  };
+
+  public query func listOrderTransactions(orderId: Text, offset: Nat, limit: Nat): async [Transaction] {
+    listByEntity(#Order, orderId, offset, limit)
+  };
+
+  public query func listPaymentTransactions(paymentId: Text, offset: Nat, limit: Nat): async [Transaction] {
+    listByEntity(#Payment, paymentId, offset, limit)
+  };
+
+  public query func listAllOrderTransactions(): async [Transaction] {
+    listAllByModel(#Order)
+  };
+
+  public query func listAllPaymentTransactions(): async [Transaction] {
+    listAllByModel(#Payment)
+  };
 
   public query func listTransactions(offset: Nat, limit: Nat): async [Transaction] {
     let n = txs.size();
