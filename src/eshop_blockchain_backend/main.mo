@@ -207,11 +207,11 @@ persistent actor {
 
   // API
 
-  public shared ({ caller }) func recordOrderTransaction(orderId: Text, items: [Item], currency: Text, note: ?Text): async Result<Transaction, Text> {
+  public shared ({ caller }) func recordOrderTransaction(orderId: Text, items: [Item], currency: Text, status: Status, note: ?Text): async Result<Transaction, Text> {
     if (Text.size(Text.trim(orderId, #text " \t\r\n")) == 0) {
       return #err "orderId is required";
     };
-    let result = recordTransactionInternal(caller, items, currency, note, #Pending);
+    let result = recordTransactionInternal(caller, items, currency, note, status);
     switch (result) {
       case (#ok tx) {
         addEntityLink(#Order, orderId, tx.id);
