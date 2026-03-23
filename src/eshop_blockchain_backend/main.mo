@@ -275,16 +275,33 @@ persistent actor {
     var p: Nat = 0;
     while (p < pageCount) {
       let stream = Buffer.Buffer<Text>(0);
-      stream.add("BT\n/F1 11 Tf\n50 810 Td\n");
-      stream.add("(" # escapePdfText("Blockchain Transaction Report - Page " # Nat.toText(p + 1) # " of " # Nat.toText(pageCount)) # ") Tj\n");
-      stream.add("0 -16 Td\n");
+    // Page header with slightly larger title and smaller subtitle
+    stream.add("BT\n/F1 16 Tf\n50 810 Td\n");
+    stream.add("(" # escapePdfText("Blockchain Transaction Report") # ") Tj\n");
+    stream.add("0 -20 Td\n");
+    stream.add("/F1 10 Tf\n");
+    stream.add("(" # escapePdfText("Page " # Nat.toText(p + 1) # " of " # Nat.toText(pageCount)) # ") Tj\n");
+    stream.add("0 -18 Td\n");
 
       let start = p * linesPerPage;
       let end = min(totalLines, start + linesPerPage);
       var i = start;
       while (i < end) {
-        let line = truncateText(lines[i], 110);
-        stream.add("(" # escapePdfText(line) # ") Tj\n");
+    let rawLine = lines[i];
+    let line = truncateText(rawLine, 110);
+
+    // Simple styling: larger font for section headers, smaller for dividers, normal for body.
+    if (Text.startsWith(rawLine, #text "BLOCKCHAIN TRANSACTION REPORT") or
+      Text.startsWith(rawLine, #text "ORDER TRANSACTIONS") or
+      Text.startsWith(rawLine, #text "PAYMENT TRANSACTIONS")) {
+      stream.add("/F1 12 Tf\n");
+    } else if (Text.startsWith(rawLine, #text "===") or Text.startsWith(rawLine, #text "---")) {
+      stream.add("/F1 9 Tf\n");
+    } else {
+      stream.add("/F1 10 Tf\n");
+    };
+
+    stream.add("(" # escapePdfText(line) # ") Tj\n");
         if (i + 1 < end) {
           stream.add("0 -16 Td\n");
         };
