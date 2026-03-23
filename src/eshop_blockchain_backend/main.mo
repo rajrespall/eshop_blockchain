@@ -1,4 +1,5 @@
 import Buffer "mo:base/Buffer";
+import Blob "mo:base/Blob";
 import HashMap "mo:base/HashMap";
 import Hash "mo:base/Hash";        // added
 import Nat "mo:base/Nat";
@@ -41,6 +42,15 @@ persistent actor {
   };
 
   public type Result<T, E> = { #ok: T; #err: E };
+
+  public type PdfExport = {
+    filename: Text;
+    contentType: Text;
+    bytes: Blob;
+    orderCount: Nat;
+    paymentCount: Nat;
+    pageCount: Nat;
+  };
 
   // Persistent state
   var nextId: Nat = 0;
@@ -106,6 +116,268 @@ persistent actor {
       case (#Payment, #Payment) { true };
       case _ { false };
     }
+  };
+
+  func statusToText(status: Status): Text {
+    switch (status) {
+      case (#Pending) { "Pending" };
+      case (#Paid) { "Paid" };
+      case (#Shipped) { "Shipped" };
+      case (#Delivered) { "Delivered" };
+      case (#Cancelled) { "Cancelled" };
+    }
+  };
+
+  func leftPadZeros(n: Nat, width: Nat): Text {
+    let t = Nat.toText(n);
+    let len = Text.size(t);
+    if (len >= width) return t;
+
+    var out = "";
+    var i: Nat = 0;
+    while (i < (width - len)) {
+      out #= "0";
+      i += 1;
+    };
+    out # t
+  };
+
+  func takeText(value: Text, limit: Nat): Text {
+    if (limit == 0) return "";
+    var out = "";
+    var i: Nat = 0;
+    for (c in value.chars()) {
+      if (i >= limit) { return out };
+      out #= Text.fromChar(c);
+      i += 1;
+    };
+    out
+  };
+
+  func truncateText(value: Text, limit: Nat): Text {
+    if (Text.size(value) <= limit) return value;
+    if (limit <= 3) return takeText(value, limit);
+    takeText(value, limit - 3) # "..."
+  };
+
+  func escapePdfText(value: Text): Text {
+    var out = "";
+    for (c in value.chars()) {
+      switch (c) {
+        case ('\\') { out #= "\\\\" };
+        case ('(') { out #= "\\(" };
+        case (')') { out #= "\\)" };
+        case ('\n') { out #= " " };
+        case ('\r') { out #= " " };
+        case _ { out #= Text.fromChar(c) };
+      }
+    };
+    out
+  };
+
+  func buildReportLines(orderTxs: [Transaction], paymentTxs: [Transaction]): [Text] {
+    let lines = Buffer.Buffer<Text>(0);
+
+    var orderTotal: Nat = 0;
+    for (tx in orderTxs.vals()) {
+      orderTotal += tx.total;
+    };
+
+    var paymentTotal: Nat = 0;
+    for (tx in paymentTxs.vals()) {
+      paymentTotal += tx.total;
+    };
+
+    lines.add("BLOCKCHAIN TRANSACTION REPORT");
+    lines.add("GeneratedAt(ns): " # Nat64.toText(now()));
+    lines.add("Orders: " # Nat.toText(orderTxs.size()) # " | Payments: " # Nat.toText(paymentTxs.size()));
+    lines.add("Order Amount Total: " # Nat.toText(orderTotal));
+    lines.add("Payment Amount Total: " # Nat.toText(paymentTotal));
+    lines.add("============================================================");
+    lines.add(" ");
+
+    lines.add("ORDER TRANSACTIONS");
+    lines.add("------------------------------------------------------------");
+    if (orderTxs.size() == 0) {
+      lines.add("No order transactions found.");
+    } else {
+      for (tx in orderTxs.vals()) {
+        lines.add("Order Tx ID: " # Nat.toText(tx.id));
+        lines.add("Buyer: " # Principal.toText(tx.buyer));
+        lines.add("Status: " # statusToText(tx.status) # " | Currency: " # tx.currency # " | Total: " # Nat.toText(tx.total));
+        lines.add("CreatedAt(ns): " # Nat64.toText(tx.createdAt) # " | UpdatedAt(ns): " # Nat64.toText(tx.updatedAt));
+        switch (tx.note) {
+          case (?note) { lines.add("Note: " # truncateText(note, 180)) };
+          case null { lines.add("Note: -") };
+        };
+        lines.add("Items:");
+        if (tx.items.size() == 0) {
+          lines.add("  - none");
+        } else {
+          for (item in tx.items.vals()) {
+            let subtotal = item.price * item.quantity;
+            lines.add(
+              "  - SKU=" # item.sku #
+              " | Name=" # truncateText(item.name, 70) #
+              " | Qty=" # Nat.toText(item.quantity) #
+              " | Price=" # Nat.toText(item.price) #
+              " | Subtotal=" # Nat.toText(subtotal)
+            );
+          };
+        };
+        lines.add(" ");
+      };
+    };
+
+    lines.add(" ");
+    lines.add("PAYMENT TRANSACTIONS");
+    lines.add("------------------------------------------------------------");
+    if (paymentTxs.size() == 0) {
+      lines.add("No payment transactions found.");
+    } else {
+      for (tx in paymentTxs.vals()) {
+        lines.add("Payment Tx ID: " # Nat.toText(tx.id));
+        lines.add("Buyer: " # Principal.toText(tx.buyer));
+        lines.add("Status: " # statusToText(tx.status) # " | Currency: " # tx.currency # " | Total: " # Nat.toText(tx.total));
+        lines.add("CreatedAt(ns): " # Nat64.toText(tx.createdAt) # " | UpdatedAt(ns): " # Nat64.toText(tx.updatedAt));
+        switch (tx.note) {
+          case (?note) { lines.add("Note: " # truncateText(note, 180)) };
+          case null { lines.add("Note: -") };
+        };
+        lines.add("Items:");
+        if (tx.items.size() == 0) {
+          lines.add("  - none");
+        } else {
+          for (item in tx.items.vals()) {
+            let subtotal = item.price * item.quantity;
+            lines.add(
+              "  - SKU=" # item.sku #
+              " | Name=" # truncateText(item.name, 70) #
+              " | Qty=" # Nat.toText(item.quantity) #
+              " | Price=" # Nat.toText(item.price) #
+              " | Subtotal=" # Nat.toText(subtotal)
+            );
+          };
+        };
+        lines.add(" ");
+      };
+    };
+
+    Buffer.toArray(lines)
+  };
+
+  func buildPdfFromLines(lines: [Text]): (Blob, Nat) {
+    let linesPerPage: Nat = 44;
+    let totalLines = lines.size();
+    let pageCount = if (totalLines == 0) 1 else (totalLines + linesPerPage - 1) / linesPerPage;
+
+    let contentStreams = Buffer.Buffer<Text>(pageCount);
+    var p: Nat = 0;
+    while (p < pageCount) {
+      let stream = Buffer.Buffer<Text>(0);
+      stream.add("BT\n/F1 11 Tf\n50 810 Td\n");
+      stream.add("(" # escapePdfText("Blockchain Transaction Report - Page " # Nat.toText(p + 1) # " of " # Nat.toText(pageCount)) # ") Tj\n");
+      stream.add("0 -16 Td\n");
+
+      let start = p * linesPerPage;
+      let end = min(totalLines, start + linesPerPage);
+      var i = start;
+      while (i < end) {
+        let line = truncateText(lines[i], 110);
+        stream.add("(" # escapePdfText(line) # ") Tj\n");
+        if (i + 1 < end) {
+          stream.add("0 -16 Td\n");
+        };
+        i += 1;
+      };
+
+      stream.add("\nET\n");
+      contentStreams.add(Text.join("", Buffer.toArray(stream).vals()));
+      p += 1;
+    };
+
+    // Object IDs
+    // 1: Catalog, 2: Pages, 3: Font
+    // Then per page: page object then content object
+    let objectCount = 3 + (pageCount * 2);
+    let objectBodies = Buffer.Buffer<Text>(objectCount);
+    let pageRefs = Buffer.Buffer<Text>(pageCount);
+
+    // 1) Catalog
+    objectBodies.add("<< /Type /Catalog /Pages 2 0 R >>");
+
+    // 2) Pages (placeholder, filled after page refs are known)
+    objectBodies.add("");
+
+    // 3) Font
+    objectBodies.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+
+    var pageIndex: Nat = 0;
+    while (pageIndex < pageCount) {
+      let pageId = 4 + (pageIndex * 2);
+      let contentId = pageId + 1;
+      pageRefs.add(Nat.toText(pageId) # " 0 R");
+
+      let pageBody =
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] " #
+        "/Resources << /Font << /F1 3 0 R >> >> " #
+        "/Contents " # Nat.toText(contentId) # " 0 R >>";
+      objectBodies.add(pageBody);
+
+      let stream = contentStreams.get(pageIndex);
+      let contentBody =
+        "<< /Length " # Nat.toText(Text.size(stream)) # " >>\n" #
+        "stream\n" #
+        stream #
+        "endstream";
+      objectBodies.add(contentBody);
+
+      pageIndex += 1;
+    };
+
+    // Fill Pages object now that page refs are ready
+    objectBodies.put(
+      1,
+      "<< /Type /Pages /Kids [" # Text.join(" ", Buffer.toArray(pageRefs).vals()) # "] /Count " # Nat.toText(pageCount) # " >>"
+    );
+
+    let header = "%PDF-1.4\n";
+    let chunks = Buffer.Buffer<Text>(objectCount + 6);
+    chunks.add(header);
+
+    let offsets = Buffer.Buffer<Nat>(objectCount + 1);
+    offsets.add(0); // free object
+
+    var running = Text.size(header);
+    var objIndex: Nat = 0;
+    while (objIndex < objectCount) {
+      let objId = objIndex + 1;
+      let body = objectBodies.get(objIndex);
+      let objectText = Nat.toText(objId) # " 0 obj\n" # body # "\nendobj\n";
+      offsets.add(running);
+      chunks.add(objectText);
+      running += Text.size(objectText);
+      objIndex += 1;
+    };
+
+    let xrefOffset = running;
+    chunks.add("xref\n");
+    chunks.add("0 " # Nat.toText(objectCount + 1) # "\n");
+    chunks.add("0000000000 65535 f \n");
+
+    var offIndex: Nat = 1;
+    while (offIndex < offsets.size()) {
+      let off = offsets.get(offIndex);
+      chunks.add(leftPadZeros(off, 10) # " 00000 n \n");
+      offIndex += 1;
+    };
+
+    chunks.add(
+      "trailer\n<< /Size " # Nat.toText(objectCount + 1) # " /Root 1 0 R >>\n" #
+      "startxref\n" # Nat.toText(xrefOffset) # "\n%%EOF"
+    );
+
+    (Text.encodeUtf8(Text.join("", Buffer.toArray(chunks).vals())), pageCount)
   };
 
   func addEntityLink(model: Model, entityId: Text, txId: Nat) {
@@ -310,6 +582,24 @@ persistent actor {
       i += 1;
     };
     Buffer.toArray(out)
+  };
+
+  // Exports all order and payment blockchain transactions to a readable PDF report.
+  // The PDF bytes are returned directly from Motoko so callers can download/save it.
+  public query func exportAllTransactionsPdf(): async PdfExport {
+    let orderTxs = listAllByModel(#Order);
+    let paymentTxs = listAllByModel(#Payment);
+    let lines = buildReportLines(orderTxs, paymentTxs);
+    let (pdfBytes, pages) = buildPdfFromLines(lines);
+
+    {
+      filename = "blockchain-transactions-report.pdf";
+      contentType = "application/pdf";
+      bytes = pdfBytes;
+      orderCount = orderTxs.size();
+      paymentCount = paymentTxs.size();
+      pageCount = pages;
+    }
   };
 
   public shared func updateStatus(id: Nat, status: Status): async Result<Transaction, Text> {
